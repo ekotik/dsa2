@@ -171,7 +171,7 @@ def load_dataset(path_data_x, path_data_y='',  colid="jobId", n_sample=-1):
     # fallback_name        = "features"
 
     if (path_data_x.startswith("http")):
-        download_path        = os.path.join(os.path.curdir, "data/input/download")
+        download_path        = os.path.join(os.path.curdir, "data/input")
         path_data_x = fetch_dataset(path_data_x, download_path)
 
     #### grab files in the folder
@@ -230,7 +230,7 @@ def fetch_dataset(url_dataset, path_target=None, file_target=None):
     """Fetch dataset from a given URL and save it.
 
     Currently `github`, `gdrive` and `dropbox` are the only supported sources of
-    data. Also only zip files are supported.
+    data.
 
     :param url_dataset:   URL to send
     :param path_target:   Path to save dataset
@@ -238,33 +238,75 @@ def fetch_dataset(url_dataset, path_target=None, file_target=None):
 
     """
     log("###### Download ##################################################")
-    from tempfile import mktemp, mkdtemp
-    from urllib.parse import urlparse, parse_qs
-    import pathlib
-    fallback_name        = "features"
-    download_path        = path_target
-    supported_extensions = [ ".zip" ]
 
+    from tempfile import mktemp
     if path_target is None:
-        path_target   = mkdtemp(dir=os.path.curdir)
-        download_path = path_target
-    else:
-        pathlib.Path(path_target).mkdir(parents=True, exist_ok=True)
+        path_target   = mktemp(dir=os.path.curdir)
 
-    if file_target is None:
-        file_target = fallback_name # mktemp(dir="")
+    fpath, fname = get_dataset_path_from_url(url_dataset)
+    assert fpath, f"No dirname in the url {url_dataset}"
+    download_path = os.path.join(path_target + "/" + fpath)
+    os.makedirs(download_path, exist_ok= True)
 
+    if file_target:
+        fname = file_target
+    elif not fname:
+        fname = mktemp(dir="")
 
+    full_filename = os.path.abspath( download_path + "/" + fname )
 
+    log('#### Download saving in ', full_filename)
     if "github.com" in url_dataset:
-        """
-                # https://github.com/arita37/dsa2_data/raw/main/input/titanic/train/features.zip
- 
-              https://github.com/arita37/dsa2_data/raw/main/input/titanic/train/features.zip            
-              https://raw.githubusercontent.com/arita37/dsa2_data/main/input/titanic/train/features.csv            
-              https://raw.githubusercontent.com/arita37/dsa2_data/tree/main/input/titanic/train/features.zip             
-              https://github.com/arita37/dsa2_data/blob/main/input/titanic/train/features.zip
-                 
+
+        import requests
+        with requests.Session() as s:
+            res = s.get(url_dataset)
+            if res.ok:
+                print(res.ok)
+                with open(full_filename, "wb") as f:
+                    f.write(res.content)
+            else:
+                raise res.raise_for_status()
+
+
+
+    if "drive.google.com" in url_dataset:
+        from util import download_googledrive
+        download_googledrive([{'fileid': fpath, "path_target": full_filename}])
+
+
+
+
+    if "dropbox.com" in url_dataset:
+        from util import download_dtopbox
+        from pathlib import Path
+        download_dtopbox({'url':      url_dataset,
+                          'out_path': os.path.dirname(full_filename)})
+        dbox_file_target = os.path.join(download_path, os.listdir(download_path)[0])
+        Path(dbox_file_target).rename(full_filename)
+
+    return full_filename
+
+
+def get_dataset_path_from_url(url_dataset):
+    """This function tries to guess directory and file name for a given URL.
+
+    """
+    fpath = ""
+    fname = ""
+
+    from urllib.parse import urlparse, parse_qs
+
+    urlx   = urlparse(url_dataset)
+    domain = urlx.netloc
+
+    if domain == "github.com":
+        """ Supported link transformations:
+        # https://github.com/arita37/dsa2_data/raw/main/input/titanic/train/features.zip
+        https://github.com/arita37/dsa2_data/raw/main/input/titanic/train/features.zip
+        https://raw.githubusercontent.com/arita37/dsa2_data/main/input/titanic/train/features.csv
+        https://raw.githubusercontent.com/arita37/dsa2_data/tree/main/input/titanic/train/features.zip
+        https://github.com/arita37/dsa2_data/blob/main/input/titanic/train/features.zip
         """
         # urlx = url_dataset.replace(  "github.com", "raw.githubusercontent.com" )
         urlx = url_dataset.replace("/blob/", "/raw/")
@@ -275,61 +317,24 @@ def fetch_dataset(url_dataset, path_target=None, file_target=None):
         urlpath = urlpath.split("/")
         fname = urlpath[-1]  ## filaneme
         fpath = "-".join(urlpath[:-1])[:-1]   ### prefix path normalized
-        assert "." in fname, f"No filename in the url {urlx}"
-
-        os.makedirs(download_path + "/" + fpath, exist_ok= True)
-        full_filename = os.path.abspath( download_path + "/" + fpath + "/" + fname )
-        log('#### Download saving in ', full_filename)
-
-        import requests
-        with requests.Session() as s:
-            res = s.get(urlx)
-            if res.ok:
-                print(res.ok)
-                with open(full_filename, "wb") as f:
-                    f.write(res.content)
-            else:
-                raise res.raise_for_status()
-        return full_filename
-
-
-
-    if "drive.google.com" in url_dataset:
-        full_filename = os.path.join(path_target, file_target)
-        from util import download_googledrive
-        urlx    = urlparse(url_dataset)
+    elif domain == "drive.google.com":
+        """ Supported link format:
+        https://drive.google.com/uc?id=1-K72L8aQPsl2qt_uBF-kzbai3TYG6Qg4
+        """
         file_id = parse_qs(urlx.query)['id'][0]
-        download_googledrive([{'fileid': file_id, "path_target":
-                               full_filename}])
+        fpath = file_id
+    elif domain == "www.dropbox.com":
+        """ Supported link format:
+        https://www.dropbox.com/s/qff0jeynqlog8ur/train.csv?dl=0
+        """
+        fpath = os.path.dirname(urlx.path)
+        fpath = fpath.split('/')[-1]
+        fname = os.path.basename(urlx.path)
+    else:
+        raise BaseException("Domain is not supported. Sorry!")
 
+    return (fpath, fname)
 
-
-
-    if "dropbox.com" in url_dataset:
-        full_filename = os.path.join(path_target, file_target)
-        from util import download_dtopbox
-        dbox_path_target = mkdtemp(dir=path_target)
-        download_dtopbox({'url':      url_dataset,
-                          'out_path': os.path.join(dbox_path_target)})
-        dbox_file_target = os.listdir(dbox_path_target)[0]
-        full_filename = os.path.join(dbox_path_target, dbox_file_target)
-
-
-
-
-    path_data_x = full_filename
-
-    #### Very Hacky : need to be removed.  ######################################
-    for file_extension in supported_extensions:
-        path_link_x = os.path.join(download_path, fallback_name + file_extension)
-        if os.path.exists(path_link_x):
-            os.unlink(path_link_x)
-        os.link(path_data_x, path_link_x)
-
-    #path_data_x = download_path + "/*"
-
-    return path_data_x
-    #return full_filename
 
 
 def load_function_uri(uri_name="myfolder/myfile.py::myFunction"):
